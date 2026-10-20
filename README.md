@@ -54,10 +54,12 @@ Example with the sample log: 200 calls, 3 failed, 2 excused, p95 1000 ms, target
 `settle` uses `gl.vm.run_nondet_unsafe` with a custom validator. Each validator re-fetches the log and re-runs the same evaluation, then:
 
 - must match **exactly** on the log's SHA-256 hash, total calls, failed calls and p95 (so every validator read the same bytes and computed the same facts),
-- may differ by at most `max(1, failed // 10)` on the **excused** count, the one number a language model influences,
+- must match **exactly** on the list of excused failures, the one input a language model influences. There is no tolerance, because a different excused list would change the payout,
 - must see the same status and reason when the log is unusable.
 
-The payout is then computed from the accepted numbers by plain code, so it is never a number the leader typed in.
+Because every accepted result is identical, every validator-compatible result carries the same settlement allocation. The payout is then computed from those numbers by plain code, so it is never a number the leader typed in. The excused failures are stored in `excused_indexes`, so anyone can see exactly which ones were excused.
+
+If validators cannot agree on an excused failure, consensus fails and no money moves. That favours safety over liveness. Unclear failures are never excused, which makes agreement more likely.
 
 ## Failure handling and safety
 
@@ -69,7 +71,7 @@ The payout is then computed from the accepted numbers by plain code, so it is ne
 
 ## Tests
 
-`python test_service_level_escrow.py` runs 7 tests against the plain-code logic with GenLayer's runtime stubbed: log parsing and hashing, the p95 calculation, the payout formula, filtering of model output (out-of-range, non-integer and boolean indexes), failing closed on bad logs, and the validator agreement rule. These do not exercise live consensus.
+`python test_service_level_escrow.py` runs 8 tests against the plain-code logic with GenLayer's runtime stubbed: log parsing and hashing, the p95 calculation, the payout formula, filtering of model output (out-of-range, non-integer and boolean indexes), failing closed on bad logs, the validator agreement rule, and a check that every accepted result carries the same payout. These do not exercise live consensus.
 
 ## Tested live
 

@@ -50,7 +50,7 @@ def test_evaluate_with_llm():
     _web(BODY)
     gl.nondet.exec_prompt = lambda task: '```json\n{"excused": [17, 88]}\n```'
     r = sle._evaluate("https://x/log.json", CLAUSE)
-    assert (r["status"], r["total"], r["failed"], r["excused"], r["p95"]) == ("OK", 200, 3, 2, 1000)
+    assert (r["status"], r["total"], r["failed"], r["excused"], r["p95"]) == ("OK", 200, 3, [17, 88], 1000)
 
 def test_llm_cannot_excuse_unknown_or_bad_indexes():
     fails = [(17, "a"), (88, "b")]
@@ -82,18 +82,34 @@ def test_invalid_evidence_fails_closed():
     assert sle._evaluate("https://x/log.json", CLAUSE)["reason"] == "FETCH_FAILED"
 
 def test_validator_agreement_rule():
-    mine = sle._result("OK", "", "h", 200, 3, 2, 1000)
+    mine = sle._result("OK", "", "h", 200, 3, [17, 88], 1000)
     assert sle._agrees(dict(mine), mine)
-    assert sle._agrees({**mine, "excused": 1}, mine)              # within slack of one call
-    assert not sle._agrees({**mine, "excused": 0}, mine)          # outside slack
-    assert not sle._agrees({**mine, "excused": 4}, mine)          # more excused than failures
-    assert not sle._agrees({**mine, "p95": 900}, mine)            # deterministic fact differs
-    assert not sle._agrees({**mine, "hash": "other"}, mine)       # read different evidence
+    assert not sle._agrees({**mine, "excused": [17]}, mine)            # one fewer excused
+    assert not sle._agrees({**mine, "excused": [17, 88, 151]}, mine)   # one more excused
+    assert not sle._agrees({**mine, "excused": [17, 151]}, mine)       # same count, different failures
+    assert not sle._agrees({**mine, "excused": [True, 88]}, mine)      # wrong type
+    assert not sle._agrees({**mine, "excused": "17,88"}, mine)
+    assert not sle._agrees({**mine, "p95": 900}, mine)                 # deterministic fact differs
+    assert not sle._agrees({**mine, "hash": "other"}, mine)            # read different evidence
     assert not sle._agrees({**mine, "total": 199}, mine)
     assert not sle._agrees("garbage", mine)
     bad = sle._result("INVALID", "NOT_JSON", "h")
     assert sle._agrees(dict(bad), bad)
-    assert not sle._agrees(dict(mine), bad)                       # leader OK, validator INVALID
+    assert not sle._agrees(dict(mine), bad)                            # leader OK, validator INVALID
+
+def test_every_accepted_result_has_the_same_allocation():
+    import itertools
+    mine = sle._result("OK", "", "h", 200, 3, [17, 88], 1000)
+    payout = lambda r: sle._payout_bps(r["total"], r["failed"], len(r["excused"]), r["p95"], 9950, 800)
+    accepted = 0
+    for n in range(4):
+        for combo in itertools.combinations([17, 88, 151], n):
+            variant = {**mine, "excused": list(combo)}
+            if sle._agrees(variant, mine):
+                accepted += 1
+                assert payout(variant) == payout(mine)
+                assert (1000000000000000000 * payout(variant)) // 10000 == 800000000000000000
+    assert accepted == 1                                              # only the identical result passes
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

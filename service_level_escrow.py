@@ -26,10 +26,10 @@ class _Recipient:
 # Deterministic helpers. Every validator must get exactly the same answers.
 # ---------------------------------------------------------------------------
 
-def _result(status, reason="", digest="", total=0, failed=0, excused=0, p95=0):
+def _result(status, reason="", digest="", total=0, failed=0, excused=(), p95=0):
     return {
         "status": status, "reason": reason, "hash": digest,
-        "total": total, "failed": failed, "excused": excused, "p95": p95,
+        "total": total, "failed": failed, "excused": list(excused), "p95": p95,
     }
 
 
@@ -79,21 +79,20 @@ def _payout_bps(total, failed, excused, p95, min_bps, max_ms) -> int:
 
 
 def _agrees(theirs, mine) -> bool:
-    """Validator rule: exact on every deterministic fact, small slack on the
-    one number an LLM influences (how many failures were excused)."""
-    if not isinstance(theirs, dict) or theirs.get("status") != mine["status"]:
+    """Validator rule: the leader's result must equal this validator's own result
+    exactly, including the list of excused failures. Anything that changes the
+    payout has to match, so every accepted result carries the same settlement
+    allocation. If validators disagree about an excused failure, consensus fails
+    and no money moves."""
+    if not isinstance(theirs, dict):
         return False
-    if theirs.get("reason") != mine["reason"] or theirs.get("hash") != mine["hash"]:
-        return False
-    if mine["status"] != "OK":
-        return True
-    for key in ("total", "failed", "p95"):
+    for key in ("status", "reason", "hash", "total", "failed", "p95"):
         if theirs.get(key) != mine[key]:
             return False
     ex = theirs.get("excused")
-    if isinstance(ex, bool) or not isinstance(ex, int) or not 0 <= ex <= mine["failed"]:
+    if not isinstance(ex, list) or any(isinstance(i, bool) or not isinstance(i, int) for i in ex):
         return False
-    return abs(ex - mine["excused"]) <= max(1, mine["failed"] // 10)
+    return ex == mine["excused"]
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +143,7 @@ def _evaluate(url: str, exclusions: str) -> dict:
         return _result("INVALID", err, digest)
     failures = _failures(records)
     excused = _excused(exclusions, failures)
-    return _result("OK", "", digest, len(records), len(failures), len(excused), _p95(records))
+    return _result("OK", "", digest, len(records), len(failures), excused, _p95(records))
 
 
 class ServiceLevelEscrow(gl.Contract):
@@ -154,7 +153,9 @@ class ServiceLevelEscrow(gl.Contract):
     The provider publishes a JSON service log. The contract computes success
     rate and p95 latency from it with plain code, uses validators only to decide
     which failures an agreed exclusion clause excuses, and pays the provider a
-    proportional share, refunding the rest to the client.
+    proportional share, refunding the rest to the client. Validators must agree
+    exactly on the list of excused failures, so every accepted result carries the
+    same settlement allocation.
 
     Stages: AWAITING_ACCEPT -> AWAITING_FUNDS -> ACTIVE -> SETTLED
             ACTIVE -> EVIDENCE_FAILED (after 3 unusable logs) -> REFUNDED
@@ -174,6 +175,7 @@ class ServiceLevelEscrow(gl.Contract):
     total_calls: u256
     failed_calls: u256
     excused_calls: u256
+    excused_indexes: str
     p95_ms: u256
     payout_bps: u256
     to_provider: u256
@@ -203,6 +205,7 @@ class ServiceLevelEscrow(gl.Contract):
         self.total_calls = u256(0)
         self.failed_calls = u256(0)
         self.excused_calls = u256(0)
+        self.excused_indexes = ""
         self.p95_ms = u256(0)
         self.payout_bps = u256(0)
         self.to_provider = u256(0)
@@ -270,7 +273,8 @@ class ServiceLevelEscrow(gl.Contract):
                     "attempts": int(self.attempts)}
 
         total, failed = int(result["total"]), int(result["failed"])
-        excused, p95 = int(result["excused"]), int(result["p95"])
+        excused_list = [int(i) for i in result["excused"]]
+        excused, p95 = len(excused_list), int(result["p95"])
         bps = _payout_bps(total, failed, excused, p95, min_bps, max_ms)
         amount = int(self.amount)
         share = amount * bps // BPS
@@ -279,6 +283,7 @@ class ServiceLevelEscrow(gl.Contract):
         self.total_calls = u256(total)
         self.failed_calls = u256(failed)
         self.excused_calls = u256(excused)
+        self.excused_indexes = ",".join(str(i) for i in excused_list)
         self.p95_ms = u256(p95)
         self.evidence_hash = result["hash"]
         self.last_error = ""
@@ -322,6 +327,7 @@ class ServiceLevelEscrow(gl.Contract):
             "total_calls": str(int(self.total_calls)),
             "failed_calls": str(int(self.failed_calls)),
             "excused_calls": str(int(self.excused_calls)),
+            "excused_indexes": self.excused_indexes,
             "p95_ms": str(int(self.p95_ms)),
             "payout_bps": str(int(self.payout_bps)),
             "to_provider": str(int(self.to_provider)),
